@@ -238,7 +238,7 @@ async function fetchTx(freq, piCode, rdsPs) {
             pi: match.pi,
             foundStation: true,
             reg: match.detectedByPireg,
-            others: multiMatches,
+            others: multiMatches.slice(),
         };
         filteredLocations.length = 0;
         multiMatches.length = 0;
