@@ -4,6 +4,7 @@ const consoleCmd = require('./console');
 
 let localDb = {};
 let lastFetchTime = 0;
+let piFreqIndex = {}; // Indexing for speedier PI+Freq combinations
 const fetchInterval = 1000;
 const esSwitchCache = {"lastCheck": null, "esSwitch": false};
 const esFetchInterval = 300000;
@@ -35,11 +36,25 @@ if (typeof algorithms[algoSetting] !== 'undefined') {
         const response = await fetch(`https://maps.fmdx.org/api?qth=${serverConfig.identification.lat},${serverConfig.identification.lon}`);
         if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
         localDb = await response.json();
+        buildPiFreqIndex();
         consoleCmd.logInfo('Transmitter database successfully loaded.');
     } catch (error) {
         consoleCmd.logError("Failed to fetch transmitter database:", error);
     }
 })();
+
+// Function to build index map of PI+Freq combinations
+function buildPiFreqIndex() {
+    piFreqIndex = {}; // reset
+    for (const locData of Object.values(localDb.locations || {})) {
+        for (const station of locData.stations || []) {
+            if (!station.pi || !station.freq) continue;
+            const key = `${station.freq}|${station.pi.toUpperCase()}`;
+            if (!piFreqIndex[key]) piFreqIndex[key] = [];
+            piFreqIndex[key].push({ ...locData, station });
+        }
+    }
+}
 
 // Load the US states GeoJSON data
 async function loadUsStatesGeoJson() {
@@ -105,11 +120,16 @@ function getStateForCoordinates(lat, lon) {
  * If at least three valid matches are found for any token, the function returns true.
  */
 function validPsCompare(rdsPs, stationPs) {
+    if (typeof stationPs !== 'string' || typeof rdsPs !== 'string') {
+        consoleCmd.logError(`Invalid TX values. stationPs: ${stationPs}, rdsPs: ${rdsPs}`);
+        return false;
+    }
+
     // Standardize the rdsPs string: replace spaces with underscores and convert to lowercase.
     const standardizedRdsPs = rdsPs.replace(/ /g, '_').toLowerCase();
     
     // Split stationPs into tokens (e.g., "__mdr___ _kultur_" -> ["__mdr___", "_kultur_"])
-    const psTokens = stationPs.split(/\s+/).filter(token => token.length > 0).map(token => token.toLowerCase());
+    const psTokens = stationPs.split(/\s+/).filter(token => token.length > 0).map(token => { const lower = token.toLowerCase(); return lower.length < 8 ? lower.padEnd(8, '_') : lower; });
        
     // Iterate through all tokens and check if any token yields at least three valid (non "_" ) matches.
     for (let token of psTokens) {
@@ -156,29 +176,41 @@ async function fetchTx(freq, piCode, rdsPs) {
     const now = Date.now();
     freq = parseFloat(freq);
 
-    if (isNaN(freq)) return;
-    if (now - lastFetchTime < fetchInterval
-        || serverConfig.identification.lat.length < 2
-        || freq < 87
-        || Object.keys(localDb).length === 0
-        || (currentPiCode === piCode && currentRdsPs === rdsPs)) {
-        return Promise.resolve();
-    }
+    if (
+        isNaN(freq) ||
+        now - lastFetchTime < fetchInterval ||
+        serverConfig.identification.lat.length < 2 ||
+        freq < 87 ||
+        Object.keys(localDb).length === 0 ||
+        (currentPiCode === piCode && currentRdsPs === rdsPs)
+    ) return Promise.resolve();
 
     lastFetchTime = now;
     currentPiCode = piCode;
     currentRdsPs = rdsPs;
     if (serverConfig.webserver.rdsMode === true) await loadUsStatesGeoJson();
 
-    let filteredLocations = Object.values(localDb.locations || {})
-        .map(locData => ({
-            ...locData,
-            stations: locData.stations.filter(station => 
-            station.freq === freq &&
-            (station.pi === piCode.toUpperCase() || station.pireg === piCode.toUpperCase() )
-            )
-        }))
-        .filter(locData => locData.stations.length > 0); // Ensure locations with at least one matching station remain
+    const key = `${freq}|${piCode.toUpperCase()}`;
+    let rawMatches = piFreqIndex[key] || [];
+
+    // Format the results into the same structure as before
+    let filteredLocations = rawMatches.map(({ station, ...locData }) => ({
+        ...locData,
+        stations: [station]
+    }));
+
+    // If no match via index, fallback
+    if (filteredLocations.length === 0 && piFreqIndex[key] <= 5) {
+        filteredLocations = Object.values(localDb.locations || {})
+            .map(locData => ({
+                ...locData,
+                stations: locData.stations.filter(station =>
+                    station.freq === freq &&
+                    (station.pi === piCode.toUpperCase() || station.pireg === piCode.toUpperCase())
+                )
+            }))
+            .filter(locData => locData.stations.length > 0);
+    }
 
     // Only check PS if we have more than one match.
     if (filteredLocations.length > 1) {
@@ -206,7 +238,7 @@ async function fetchTx(freq, piCode, rdsPs) {
         // Have a maximum of 10 extra matches and remove any with less than 1/10 of the winning score
         multiMatches = filteredLocations
             .slice(1, 11)
-            .filter(obj => obj.score >= (match.score/10));
+            .filter(obj => obj.score >= (match.score / 10));
     } else if (filteredLocations.length === 1) {
         match = filteredLocations[0];
         match.score = 1;
