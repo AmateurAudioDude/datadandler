@@ -48,10 +48,20 @@ function buildPiFreqIndex() {
     piFreqIndex = {}; // reset
     for (const locData of Object.values(localDb.locations || {})) {
         for (const station of locData.stations || []) {
-            if (!station.pi || !station.freq) continue;
-            const key = `${station.freq}|${station.pi.toUpperCase()}`;
-            if (!piFreqIndex[key]) piFreqIndex[key] = [];
-            piFreqIndex[key].push({ ...locData, station });
+            if (!station.freq) continue;
+            const freq = station.freq;
+            const pi = station.pi?.toUpperCase();
+            const pireg = station.pireg?.toUpperCase();
+            if (pi) {
+                const key = `${freq}|${pi}`;
+                if (!piFreqIndex[key]) piFreqIndex[key] = [];
+                piFreqIndex[key].push({ ...locData, station });
+            }
+            if (pireg) {
+                const regKey = `${freq}|${pireg}`;
+                if (!piFreqIndex[regKey]) piFreqIndex[regKey] = [];
+                piFreqIndex[regKey].push({ ...locData, station });
+            }
         }
     }
 }
@@ -198,19 +208,15 @@ async function fetchTx(freq, piCode, rdsPs) {
         ...locData,
         stations: [station]
     }));
-
-    // If no match via index, fallback
-    if (filteredLocations.length === 0 && piFreqIndex[key] <= 5) {
-        filteredLocations = Object.values(localDb.locations || {})
-            .map(locData => ({
-                ...locData,
-                stations: locData.stations.filter(station =>
-                    station.freq === freq &&
-                    (station.pi === piCode.toUpperCase() || station.pireg === piCode.toUpperCase())
-                )
-            }))
-            .filter(locData => locData.stations.length > 0);
+    
+    let regMatches = [];
+    for (const obj of piFreqIndex[key] || []) {
+        if (obj.station?.pireg === piCode.toUpperCase() && obj.station?.pi !== obj.station?.pireg) {
+            regMatches.push(obj);
+        }
     }
+    
+    rawMatches = rawMatches.concat(regMatches);
 
     // Only check PS if we have more than one match.
     if (filteredLocations.length > 1) {
